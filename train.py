@@ -18,7 +18,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=1337, help="random seed")
 parser.add_argument("--micro_batch_size", type=int, default=8, help="micro batch size")
 # other
-parser.add_argument("--hybrid_mode", action="store_true", help="hybrid arch") # True, False
+parser.add_argument("--hybrid_mode", type=int, help="hybrid arch") # 1, 0
+parser.add_argument("--data_aug", type=int, help="data augmentation") # 1, 0
 parser.add_argument("--mamba_d_state", type=int, default=128, help="mamba d_state") # 8, 16, 64
 parser.add_argument("--att_n_embd", type=int, default=128, help="attention embedding size") # 64, 128
 parser.add_argument("--n_layer", type=int, default=12, help="number of layers") # 4, 6, 8
@@ -27,7 +28,6 @@ parser.add_argument("--max_lr", type=float, default=6e-4, help="max learning rat
 parser.add_argument("--max_steps", type=int, default=800, help="number of training steps") # 256, 512, 1024
 parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay") # 0.1, 0.01, 0.001
 parser.add_argument("--grad_norm_clip", type=float, default=1.0, help="gradient norm clipping") # 1.0, 0.6, 2.0
-parser.add_argument("--data_aug", action="store_true", help="data augmentation") # True, False
 args = parser.parse_args()
 
 wandb.init(
@@ -101,12 +101,12 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 4096 # max sequence length
     # vocab_size: int = 50257 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    vocab_size: int = 10
+    vocab_size: int = 12
     n_layer: int = args.n_layer # number of layers
     n_head: int = 4 # number of heads
     n_embd: int = args.att_n_embd # embedding dimension
     # Mamba2 config
-    hybrid_mode: bool = args.hybrid_mode
+    hybrid_mode: bool = bool(args.hybrid_mode)
     mamba_d_model: int = 128
     mamba_head_dim: int = 4
     mamba_d_state: int = args.mamba_d_state
@@ -286,17 +286,22 @@ class ARCDataset(Dataset):
                 for test_case in task['test']:
                     test_case_input = np.array(test_case['input'])
                     test_case_output = np.array(test_case['output'])
-                if args.data_aug:
+                if bool(args.data_aug):
                     if np.random.rand() < 0.5:
                         demo_input = np.flip(demo_input, axis=0)
                         demo_output = np.flip(demo_output, axis=0)
                         test_case_input = np.flip(test_case_input, axis=0)
                         test_case_output = np.flip(test_case_output, axis=0)
                 x = np.hstack([
+                    np.array([11]), # separator token
                     demo_input.flatten(),
+                    np.array([11]), # separator token
                     demo_output.flatten(),
+                    np.array([11]), # separator token
                     test_case_input.flatten(),
+                    np.array([11]), # separator token
                     test_case_output.flatten(),
+                    np.array([11]), # separator token
                 ])
                 # shift by one for next token prediction
                 y = x[1:] + [0]
@@ -308,6 +313,8 @@ class ARCDataset(Dataset):
 
     def pad_sequence(self, sequence, max_length):
         padded_sequence = np.zeros(max_length, dtype=sequence.dtype)
+        # set padded to empty token
+        padded_sequence[:] = 10
         length = min(len(sequence), max_length)
         padded_sequence[:length] = sequence[:length]
         return padded_sequence
@@ -542,6 +549,13 @@ for step in range(max_steps):
         print(f"step {step:5d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
         with open(log_file, "a") as f:
             f.write(f"{step} train {loss_accum.item():.6f}\n")
+
+# write out val loss to yaml file
+import yaml
+
+
+with open("/log/results.yaml", "w") as f:
+    yaml.dump({"val_loss": val_loss_accum.item()}, f)
 
 wandb.finish()
 if ddp:
